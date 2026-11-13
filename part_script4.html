@@ -4,6 +4,7 @@
   const BOOK2_STR = "/*BOOK2*/";
   const BOOK3_MAX = /*BOOK3_MAX*/0;        // AI-first book: human turns with at most this many stones
   const BOOK3_STR = "/*BOOK3*/";
+  const BOOK4 = /*BOOK4*/null;             // two-player table: value of every position with <= lmax stones
   const WASM_B64 = "/*WASM*/";
 
   // ---- human-first book: per node 7 chars; code = rank*14 + reply*2 + terminal, 42 = illegal, 43 = human wins now ----
@@ -48,9 +49,53 @@
     if (BOOK3_STR.length) node('4');
   })();
 
+  // ---- two-player table: static function key -> 0 lost / 1 draw / 2 won (for the side to move) ----
+  const T4 = BOOK4 ? Uint8Array.from(atob(BOOK4.data), ch => ch.charCodeAt(0)) : null;
+  const P128 = [1, 128, 16384, 2097152, 268435456, 34359738368, 4398046511104];
+  function mix4(lo, hi, seed) {
+    let h = seed ^ Math.imul(lo, 0x9E3779B1);
+    h = Math.imul(h ^ (h >>> 15), 0x85EBCA6B);
+    h ^= Math.imul((hi + 0x7F4A7C15) | 0, 0xC2B2AE35);
+    h = Math.imul(h ^ (h >>> 13), 0x27D4EB2F);
+    return (h ^ (h >>> 16)) >>> 0;
+  }
+  function value4(key) {
+    const lo = key % 67108864, hi = Math.floor(key / 67108864);
+    let v = 0;
+    for (let i = 0; i < 3; i++) {
+      const x = mix4(lo, hi, (BOOK4.seed + Math.imul(i, 0x632BE5AB)) | 0) % BOOK4.segLen + i * BOOK4.segLen;
+      v ^= (T4[x >> 2] >> ((x & 3) * 2)) & 3;
+    }
+    return v;
+  }
+  function key4(moverId) {                    // mirror-reduced key of the current grid
+    let a = 0, b = 0;
+    for (let c = 0; c < 7; c++) {
+      let code = 1 << heights[c];
+      for (let r = 0; r < heights[c]; r++) if (grid[c][r] === moverId) code |= 1 << r;
+      a += code * P128[c]; b += code * P128[6 - c];
+    }
+    return a < b ? a : b;
+  }
+  function book4Moves() {                     // rank of every column for the side to move, or null if too deep
+    if (!T4 || seq.length + 1 > BOOK4.lmax) return null;
+    const me = turn(), opp = 3 - me, m = [];
+    for (let c = 0; c < 7; c++) {
+      const h = heights[c];
+      if (h >= 6) { m.push(null); continue; }
+      if (findWin(c, h, me)) { m.push(2); continue; }
+      grid[c][h] = me; heights[c]++;
+      m.push(2 - value4(key4(opp)));
+      heights[c]--; grid[c][h] = 0;
+    }
+    return m;
+  }
+
   const fmt = n => n.toLocaleString('zh-Hant');
   document.getElementById('book2Size').textContent = fmt(book2.size);
   document.getElementById('book3Size').textContent = fmt(book3.size);
+  document.getElementById('book4Size').textContent = BOOK4 ? fmt(BOOK4.n) : '0';
+  document.getElementById('book4Depth').textContent = BOOK4 ? BOOK4.lmax : 0;
 
   // ---- worker ----
   const wasmBytes = Uint8Array.from(atob(WASM_B64), ch => ch.charCodeAt(0));
@@ -75,7 +120,7 @@
   // analysis of the current human turn:
   //   kind 'rank': m[c] = 0 lost / 1 draw / 2 won for the human
   //   kind 'dist': m[c] = how many more stones the AI needs to connect four (bigger = longer resistance)
-  let analysis = null;
+  let analysis = null, anaFor = null;
   let mistakes = [], lastFb = null;
   const $ = id => document.getElementById(id);
   const boardEl = $('board'), statusText = $('statusText'), statusDot = $('statusDot');
@@ -88,7 +133,7 @@
     const saved = JSON.parse(localStorage.getItem('c4opts') || '{}');
     if (typeof saved.coach === 'boolean') coachToggle.checked = saved.coach;
     if (typeof saved.hint === 'boolean') hintToggle.checked = saved.hint;
-    if (saved.mode === 'ai' || saved.mode === 'human') mode = saved.mode;
+    if (saved.mode === 'ai' || saved.mode === 'human' || saved.mode === 'two') mode = saved.mode;
   } catch (e) {}
   function saveOpts() {
     try { localStorage.setItem('c4opts', JSON.stringify({ coach: coachToggle.checked, hint: hintToggle.checked, mode })); } catch (e) {}
@@ -106,8 +151,11 @@
     boardEl.appendChild(col); colEls.push(col);
   }
 
-  const mover = i => ((mode === 'ai') === (i % 2 === 0)) ? AI : HUMAN;
+  const mover = i => mode === 'two' ? (i % 2 === 0 ? 1 : 2) : ((mode === 'ai') === (i % 2 === 0)) ? AI : HUMAN;
   const turn = () => mover(seq.length);
+  const isHumanTurn = () => mode === 'two' || turn() === HUMAN;
+  const needAnalysis = () => mode !== 'two' || coachToggle.checked || hintToggle.checked;
+  const SIDE = ['', '紅方', '黃方'];
   const colList = cols => cols.map(c => '第 ' + (c + 1) + ' 欄').join('或');
 
   function findWin(c, r, p) {
@@ -149,7 +197,7 @@
       const isLast = lastCell && lastCell[0] === c && lastCell[1] === r;
       disc.className = 'disc ' + (p === AI ? 'red' : 'yellow') + (isWin ? ' win' : '') + (isLast ? ' last' : '');
     }
-    const humanTurn = !over && !thinking && !waiting && turn() === HUMAN;
+    const humanTurn = !over && !thinking && !waiting && isHumanTurn();
     for (let c = 0; c < 7; c++) colEls[c].disabled = !humanTurn || heights[c] >= 6;
     btnUndo.disabled = thinking || waiting || undoCut() < 0;
     recordEl.textContent = seq ? '棋譜（欄號）：' + seq.split('').join(' ') : '';
@@ -172,6 +220,12 @@
   }
 
   function updateStatus() {
+    if (mode === 'two') {
+      if (over === 1 || over === 2) return setStatus(over === 1 ? 'red' : 'yellow', SIDE[over] + '連成四子，獲勝！<small>按「新的一局」再來一盤。</small>');
+      if (over === 3) return setStatus('none', '和局。<small>棋盤下滿，沒有人連成四子。</small>');
+      if (waiting) return setStatus(turn() === 1 ? 'red' : 'yellow', '分析中…<small>正在計算每一欄的結果。</small>', true);
+      return setStatus(turn() === 1 ? 'red' : 'yellow', '輪到' + SIDE[turn()] + (turn() === 1 ? '（先手）' : '（後手）') + '。<small>點任一欄落子。</small>');
+    }
     if (over === HUMAN) return setStatus('yellow', mode === 'human'
       ? '你連成四子，獲勝！<small>全程沒有失誤，這就是先手必勝的下法。</small>'
       : '你贏了。<small>這不應該發生，請把棋譜回報給我。</small>');
@@ -190,23 +244,26 @@
     const f = lastFb;
     if (f) {
       const n = Math.floor(f.idx / 2) + 1, col = '第 ' + (f.col + 1) + ' 欄';
+      const who = (f.player ? SIDE[f.player] : '你的') + '第 ' + n + ' 手';
       if (f.kind === 'rank') {
         if (f.ok) {
-          html += '<div class="fb good"><strong class="good">正確。</strong>你的第 ' + n + ' 手下' + col + '，局面維持「' + RANK[f.after] + '」。';
+          html += '<div class="fb good"><strong class="good">正確。</strong>' + who + '下' + col + '，局面維持「' + RANK[f.after] + '」。';
           if (f.before === 0) html += '不過這個局面已經是理論必敗，下哪一欄都救不回來，問題出在更早的失誤。';
           else if (f.unique) html += '這是唯一不掉結果的一步。';
           html += '</div>';
         } else {
-          html += '<div class="fb bad"><strong class="bad">失誤。</strong>你的第 ' + n + ' 手下' + col + '，局面從「' + RANK[f.before] + '」變成「' + RANK[f.after] + '」。' +
+          html += '<div class="fb bad"><strong class="bad">失誤。</strong>' + who + '下' + col + '，局面從「' + RANK[f.before] + '」變成「' + RANK[f.after] + '」。' +
             '應該下<b>' + colList(f.bestCols) + '</b>，才能維持「' + RANK[f.before] + '」。按「悔棋」可以回去重下。</div>';
         }
       } else if (f.ok) {
-        html += '<div class="fb good"><strong class="good">正確。</strong>你的第 ' + n + ' 手下' + col + '是最頑強的防守，AI 最快還要 ' + f.after + ' 手才能連成四子。' +
+        html += '<div class="fb good"><strong class="good">正確。</strong>' + who + '下' + col + '是最頑強的防守，AI 最快還要 ' + f.after + ' 手才能連成四子。' +
           (f.unique ? '這是唯一撐最久的一步。' : '') + '</div>';
       } else {
-        html += '<div class="fb bad"><strong class="bad">可以更好。</strong>你的第 ' + n + ' 手下' + col + '，AI 最快再 ' + f.after + ' 手就能連成四子。' +
+        html += '<div class="fb bad"><strong class="bad">可以更好。</strong>' + who + '下' + col + '，AI 最快再 ' + f.after + ' 手就能連成四子。' +
           '下<b>' + colList(f.bestCols) + '</b>可以拖到 ' + f.before + ' 手。按「悔棋」可以回去重下。</div>';
       }
+    } else if (mode === 'two' && !seq.length) {
+      html += '<div class="fb info">雙人對弈：兩位在同一台裝置上輪流落子，紅方先手。每下一步，教練會講評這一手（結果以下這一手的那一方來看）。</div>';
     } else if (mode === 'human' && !seq.length) {
       html += '<div class="fb info">你先手。每下一步，教練會告訴你這步有沒有下錯、應該下哪裡。</div>';
     } else if (mode === 'ai' && seq.length <= 1) {
@@ -217,7 +274,7 @@
       for (const g of mistakes) {
         const n = Math.floor(g.idx / 2) + 1;
         html += g.kind === 'rank'
-          ? '<li>第 ' + n + ' 手：下了第 ' + (g.col + 1) + ' 欄（' + RANK[g.before] + ' → ' + RANK[g.after] + '），應下' + colList(g.bestCols) + '。</li>'
+          ? '<li>' + (g.player ? SIDE[g.player] : '') + '第 ' + n + ' 手：下了第 ' + (g.col + 1) + ' 欄（' + RANK[g.before] + ' → ' + RANK[g.after] + '），應下' + colList(g.bestCols) + '。</li>'
           : '<li>第 ' + n + ' 手：下了第 ' + (g.col + 1) + ' 欄（撐 ' + g.after + ' 手），下' + colList(g.bestCols) + '可以撐 ' + g.before + ' 手。</li>';
       }
       html += '</ol></div>';
@@ -227,22 +284,28 @@
 
   // ---- turn flow (same for both modes) ----
   function prepareAnalysis() {
-    analysis = null;
-    const b = (mode === 'human' ? book2 : book3).get(seq);
+    analysis = null; anaFor = null;
+    if (!needAnalysis()) { render(); return; }
+    const b = mode === 'two' ? null : (mode === 'human' ? book2 : book3).get(seq);
+    const m4 = mode === 'two' ? book4Moves() : null;
     if (b) {
       const best = Math.max(...b.m.filter(v => v != null));
       analysis = { kind: mode === 'human' ? 'rank' : 'dist', m: b.m, replies: b.replies, bestCols: ALL.filter(c => b.m[c] === best) };
+    } else if (m4) {
+      const best = Math.max(...m4.filter(v => v != null));
+      analysis = { kind: 'rank', m: m4, replies: null, bestCols: ALL.filter(c => m4[c] === best) };
     } else {
+      anaFor = seq;
       send({ type: 'analyze', seq });
     }
     render();
   }
 
   function onAnalysis(s, scores) {
-    if (s !== seq || over || turn() !== HUMAN || analysis) return;
+    if (s !== seq || over || !isHumanTurn() || analysis) return;
     const top = Math.max(...scores.filter(v => v != null));
     const bestCols = ALL.filter(c => scores[c] === top);
-    if (mode === 'human') {
+    if (mode !== 'ai') {
       analysis = { kind: 'rank', m: scores.map(v => v == null ? null : v > 0 ? 2 : v < 0 ? 0 : 1), replies: null, bestCols };
     } else {
       // score v < 0: the AI wins with its (22 + v)-th stone; it has (len + 1) / 2 stones now
@@ -256,14 +319,16 @@
   function coachMove(c) {
     const a = analysis, idx = seq.length;
     const best = Math.max(...a.m.filter(v => v != null)), mine = a.m[c];
-    const fb = { kind: a.kind, idx, col: c, before: best, after: mine, bestCols: a.bestCols, ok: mine === best,
+    const me = turn();
+    const fb = { kind: a.kind, idx, col: c, before: best, after: mine, bestCols: a.bestCols, ok: mine === best, player: mode === 'two' ? me : 0,
                  unique: a.m.filter(v => v === best).length === 1 };
     if (!fb.ok) mistakes.push(fb);
     lastFb = fb;
     const reply = a.replies ? a.replies[c] : null;
     analysis = null;
-    place(c, HUMAN, true);
+    place(c, me, true);
     if (over) return;
+    if (mode === 'two') { prepareAnalysis(); return; }
     thinking = true; render();
     if (reply != null) {
       const id = ++reqId;
@@ -280,15 +345,24 @@
   }
 
   function humanMove(c) {
-    if (over || thinking || waiting || turn() !== HUMAN || heights[c] >= 6) return;
-    if (!analysis) { pendingClick = c; waiting = true; render(); return; }
+    if (over || thinking || waiting || !isHumanTurn() || heights[c] >= 6) return;
+    if (!analysis) {
+      if (!needAnalysis()) {                 // plain two-player move, nothing to evaluate
+        lastFb = null;
+        place(c, turn(), true);
+        if (!over) prepareAnalysis();
+        return;
+      }
+      if (anaFor !== seq) { anaFor = seq; send({ type: 'analyze', seq }); }
+      pendingClick = c; waiting = true; render(); return;
+    }
     coachMove(c);
   }
 
   function replay(s) {
     grid = Array.from({ length: 7 }, () => Array(6).fill(0));
     heights = Array(7).fill(0); seq = ''; over = 0; thinking = false; waiting = false; pendingClick = null;
-    lastCell = null; winCells = null; analysis = null;
+    lastCell = null; winCells = null; analysis = null; anaFor = null;
     reqId++;
     for (let i = 0; i < s.length; i++) {
       const c = +s[i] - 1, p = mover(i);
@@ -298,6 +372,7 @@
 
   // index of the human's most recent move (position to return to), or -1
   function undoCut() {
+    if (mode === 'two') return seq.length - 1;
     for (let k = seq.length - 1; k >= 0; k--) if (mover(k) === HUMAN) return k;
     return -1;
   }
@@ -313,6 +388,7 @@
     mode = m;
     $('modeAi').setAttribute('aria-pressed', m === 'ai');
     $('modeHuman').setAttribute('aria-pressed', m === 'human');
+    $('modeTwo').setAttribute('aria-pressed', m === 'two');
     saveOpts();
     newGame();
   }
@@ -320,8 +396,15 @@
   $('btnNew').addEventListener('click', newGame);
   $('modeAi').addEventListener('click', () => setMode('ai'));
   $('modeHuman').addEventListener('click', () => setMode('human'));
-  hintToggle.addEventListener('change', () => { saveOpts(); render(); });
-  coachToggle.addEventListener('change', () => { saveOpts(); render(); });
+  $('modeTwo').addEventListener('click', () => setMode('two'));
+  const onToggle = () => {
+    saveOpts();
+    // two-player mode only analyses when an option is on: start now if it was just switched on mid-turn
+    if (mode === 'two' && !over && !waiting && !analysis && needAnalysis() && anaFor !== seq) prepareAnalysis();
+    else render();
+  };
+  hintToggle.addEventListener('change', onToggle);
+  coachToggle.addEventListener('change', onToggle);
   btnUndo.addEventListener('click', () => {
     if (thinking || waiting) return;
     const cut = undoCut();

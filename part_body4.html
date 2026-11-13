@@ -3,6 +3,7 @@
   .opts label { font-size: .92rem; display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 3px 0; }
   .opts input { width: 19px; height: 19px; margin: 0; accent-color: var(--accent); }
   .colnums span b { white-space: nowrap; }
+  .modes { grid-template-columns: repeat(3, 1fr); }
 </style>
 <main>
   <h1>四子棋：必勝 AI 與教練</h1>
@@ -10,6 +11,7 @@
   <div class="modes" role="group" aria-label="誰先手">
     <button id="modeHuman" aria-pressed="false">我先手</button>
     <button id="modeAi" aria-pressed="false">AI 先手</button>
+    <button id="modeTwo" aria-pressed="false">雙人對弈</button>
   </div>
 
   <div id="status" aria-live="polite"><span class="dot none" id="statusDot"></span><div id="statusText">載入中…</div></div>
@@ -35,10 +37,11 @@
     <ul>
       <li><b>我先手</b>：每個局面對你是「必勝、和局、必敗」其中之一。你下完如果結果變差（例如必勝變和局）就是失誤，教練會告訴你當時該下哪一欄。先手只要全程不失誤就一定贏。</li>
       <li><b>AI 先手</b>：AI 第一步下中間後，你理論上必敗，所以教練改成比較「撐得久不久」。每一欄會算出 AI 最快還要幾手才能連成四子，手數最多的就是最頑強的防守。</li>
-      <li><b>落子前顯示每欄結果</b>：勾選後先看答案。我先手時顯示「勝／和／敗」；AI 先手時顯示「幾手」，數字越大撐越久。</li>
+      <li><b>雙人對弈</b>：兩位在同一台裝置上輪流下，紅方先手。講評和每欄結果都以「現在要下的那一方」來看：必勝、和局、必敗。任何一方下完讓自己的結果變差，就是失誤。</li>
+      <li><b>落子前顯示每欄結果</b>：勾選後先看答案。我先手和雙人對弈時顯示「勝／和／敗」；AI 先手時顯示「幾手」，數字越大撐越久。</li>
       <li>兩個選項互相獨立，都不勾就是單純對弈。</li>
     </ul>
-    <p>開局階段用預先算好的資料（我先手 <span id="book2Size"></span> 個局面、AI 先手 <span id="book3Size"></span> 個局面，每欄結果都由求解器算出）；之後由瀏覽器即時把棋局算到底。</p>
+    <p>開局階段用預先算好的資料（我先手 <span id="book2Size"></span> 個局面、AI 先手 <span id="book3Size"></span> 個局面，每欄結果都由求解器算出；雙人對弈則涵蓋 <span id="book4Depth"></span> 顆棋以內的全部 <span id="book4Size"></span> 個盤面）；之後由瀏覽器即時把棋局算到底。雙人對弈因為兩邊都可能走出冷門盤面，中盤的即時分析偶爾要等幾秒。</p>
   </details>
 
   <details>

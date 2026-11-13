@@ -55,12 +55,13 @@ const parts3 = [];
 const out2 = parts2.join(''), out3 = parts3.join('');
 for (const o of [out2, out3]) if (o.includes('"') || o.includes('\\') || o.includes('/')) throw new Error('unsafe char in book encoding');
 
-let html = read('./part_head.html') + read('./part_body3.html') + read('./part_worker.html') + read('./part_script3.html');
+let html = read('./part_head.html') + read('./part_body4.html') + read('./part_worker.html') + read('./part_script4.html');
 const put = (k, v) => { if (!html.includes(k)) throw new Error('placeholder missing ' + k); html = html.replace(k, () => v); };
 put('/*BOOK2_MAX*/0', String(BOOK2_MAX));
 put('/*BOOK2*/', out2);
 put('/*BOOK3_MAX*/0', String(BOOK3_MAX));
 put('/*BOOK3*/', out3);
+put('/*BOOK4*/null', read('./book4.json'));
 put('/*WASM*/', wasm.toString('base64'));
 fs.writeFileSync(here('./four-in-a-row.html'), html);
 console.log('human-first nodes', parts2.length, 'ai-first nodes', parts3.length, 'html bytes', html.length);
