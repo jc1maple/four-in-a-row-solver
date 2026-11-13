@@ -1,0 +1,61 @@
+<style>
+  .opts { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 2px 0 10px; }
+  .opts label { font-size: .92rem; display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 3px 0; }
+  .opts input { width: 19px; height: 19px; margin: 0; accent-color: var(--accent); }
+  .colnums span b { white-space: nowrap; }
+</style>
+<main>
+  <h1>四子棋：必勝 AI 與教練</h1>
+
+  <div class="modes" role="group" aria-label="誰先手">
+    <button id="modeHuman" aria-pressed="false">我先手</button>
+    <button id="modeAi" aria-pressed="false">AI 先手</button>
+  </div>
+
+  <div id="status" aria-live="polite"><span class="dot none" id="statusDot"></span><div id="statusText">載入中…</div></div>
+
+  <div id="board"></div>
+  <div class="colnums" id="colnums"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span></div>
+
+  <div class="controls">
+    <button class="act primary" id="btnNew">新的一局</button>
+    <button class="act" id="btnUndo">悔棋</button>
+  </div>
+  <div class="opts">
+    <label><input type="checkbox" id="coachToggle" checked> 教練模式（每步講評）</label>
+    <label><input type="checkbox" id="hintToggle"> 落子前顯示每欄結果</label>
+  </div>
+  <div class="record" id="record"></div>
+
+  <div id="coach" aria-live="polite"></div>
+
+  <details>
+    <summary>教練怎麼判斷我下得好不好？</summary>
+    <p>標準 7×6 四子棋已被完全解出，所以每個局面的理論結果都算得出來。兩種先後手的判斷方式不同：</p>
+    <ul>
+      <li><b>我先手</b>：每個局面對你是「必勝、和局、必敗」其中之一。你下完如果結果變差（例如必勝變和局）就是失誤，教練會告訴你當時該下哪一欄。先手只要全程不失誤就一定贏。</li>
+      <li><b>AI 先手</b>：AI 第一步下中間後，你理論上必敗，所以教練改成比較「撐得久不久」。每一欄會算出 AI 最快還要幾手才能連成四子，手數最多的就是最頑強的防守。</li>
+      <li><b>落子前顯示每欄結果</b>：勾選後先看答案。我先手時顯示「勝／和／敗」；AI 先手時顯示「幾手」，數字越大撐越久。</li>
+      <li>兩個選項互相獨立，都不勾就是單純對弈。</li>
+    </ul>
+    <p>開局階段用預先算好的資料（我先手 <span id="book2Size"></span> 個局面、AI 先手 <span id="book3Size"></span> 個局面，每欄結果都由求解器算出）；之後由瀏覽器即時把棋局算到底。</p>
+  </details>
+
+  <details>
+    <summary>AI 為什麼不會下錯？</summary>
+    <p>AI 每一步都是求解器算出的最佳著法：能贏就走最快的贏法，會輸就走撐最久的下法。所以 AI 先手時它一定贏；你先手時，你一失誤它就會抓住。</p>
+  </details>
+
+  <details>
+    <summary>先手心法</summary>
+    <ol>
+      <li><b>第一步下正中間（第 4 欄）。</b>這是唯一的必勝開局；下第 3、5 欄最多和局，下外側四欄理論上會輸。</li>
+      <li><b>搶奇數列的威脅。</b>列數從下往上數 1 到 6。先手的「差一子連四」的空格如果落在第 1、3、5 列，殘局時通常會輪到對手被迫把棋下到那格的正下方，你就贏了。後手則是要搶第 2、4、6 列。</li>
+      <li><b>不要下在對手威脅格的正下方。</b>你一下，對手就能疊上去完成連線。</li>
+      <li><b>做雙重威脅。</b>同時製造兩個取勝點，或是上下相鄰的兩個威脅格。</li>
+      <li><b>每一步先檢查兩件事：</b>我能不能馬上連四？對手下一步能不能連四？</li>
+      <li><b>中間欄位比邊欄有價值</b>，經過中央的四連線組合最多。</li>
+    </ol>
+  </details>
+</main>
+

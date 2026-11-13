@@ -1,0 +1,45 @@
+<script id="workerSrc" type="text/plain">
+let S = null;
+const ORDER = [3, 2, 4, 1, 5, 0, 6];
+function setup(seq) { S.reset(); for (let i = 0; i < seq.length; i++) S.play(seq.charCodeAt(i) - 49); }
+onmessage = async (e) => {
+  const m = e.data;
+  if (m.type === 'init') {
+    const r = await WebAssembly.instantiate(m.wasm, { env: { abort() { throw new Error('abort'); } } });
+    S = r.instance.exports;
+    S.init(8388617);
+    postMessage({ type: 'ready' });
+    return;
+  }
+  if (m.type === 'move') {
+    const seq = m.seq;
+    setup(seq);
+    for (const c of ORDER) if (S.canPlay(c) && S.isWinningMove(c)) { postMessage({ type: 'move', id: m.id, col: c, score: null }); return; }
+    const s = S.solve(false);
+    let col = -1;
+    for (const c of ORDER) {
+      if (!S.canPlay(c)) continue;
+      setup(seq); S.play(c);
+      if (S.getMoves() === 42) { if (s === 0) { col = c; break; } continue; }
+      if (S.canWinNext()) continue;
+      if (S.search(-s, -s + 1) <= -s) { col = c; break; }
+    }
+    if (col < 0) for (const c of ORDER) { setup(seq); if (S.canPlay(c)) { col = c; break; } }
+    postMessage({ type: 'move', id: m.id, col, score: s });
+    return;
+  }
+  if (m.type === 'analyze') {
+    // exact score of every legal move for the side to move
+    const seq = m.seq, scores = [];
+    for (let c = 0; c < 7; c++) {
+      setup(seq);
+      if (!S.canPlay(c)) { scores.push(null); continue; }
+      if (S.isWinningMove(c)) { scores.push((43 - seq.length) >> 1); continue; }
+      S.play(c);
+      scores.push(S.getMoves() === 42 ? 0 : -S.solve(false));
+    }
+    postMessage({ type: 'analysis', seq, scores });
+  }
+};
+</script>
+

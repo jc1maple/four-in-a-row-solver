@@ -1,0 +1,338 @@
+<script>
+(() => {
+  const BOOK2_MAX = /*BOOK2_MAX*/0;        // human-first book: human turns with at most this many stones
+  const BOOK2_STR = "/*BOOK2*/";
+  const BOOK3_MAX = /*BOOK3_MAX*/0;        // AI-first book: human turns with at most this many stones
+  const BOOK3_STR = "/*BOOK3*/";
+  const WASM_B64 = "/*WASM*/";
+
+  // ---- human-first book: per node 7 chars; code = rank*14 + reply*2 + terminal, 42 = illegal, 43 = human wins now ----
+  const book2 = new Map();
+  (function decode2() {
+    let i = 0;
+    function node(seq) {
+      const m = [], replies = [], kids = [];
+      for (let c = 0; c < 7; c++) {
+        const code = BOOK2_STR.charCodeAt(i++) - 48;
+        if (code === 42) { m.push(null); replies.push(null); }
+        else if (code === 43) { m.push(2); replies.push(null); }
+        else {
+          const rank = Math.floor(code / 14), reply = (code % 14) >> 1, term = code & 1;
+          m.push(rank); replies.push(reply);
+          if (!term) kids.push(seq + (c + 1) + (reply + 1));
+        }
+      }
+      book2.set(seq, { m, replies });
+      if (seq.length >= BOOK2_MAX) return;
+      for (const k of kids) node(k);
+    }
+    if (BOOK2_STR.length) node('');
+  })();
+
+  // ---- AI-first book: per node 14 chars; per column: (moves the AI still needs, 0 = illegal), (reply*2 + terminal) ----
+  const book3 = new Map();
+  (function decode3() {
+    let i = 0;
+    function node(seq) {
+      const m = [], replies = [], kids = [];
+      for (let c = 0; c < 7; c++) {
+        const a = BOOK3_STR.charCodeAt(i++) - 48, b = BOOK3_STR.charCodeAt(i++) - 48;
+        if (a === 0) { m.push(null); replies.push(null); continue; }
+        m.push(a); replies.push(b >> 1);
+        if (!(b & 1)) kids.push(seq + (c + 1) + ((b >> 1) + 1));
+      }
+      book3.set(seq, { m, replies });
+      if (seq.length >= BOOK3_MAX) return;
+      for (const k of kids) node(k);
+    }
+    if (BOOK3_STR.length) node('4');
+  })();
+
+  const fmt = n => n.toLocaleString('zh-Hant');
+  document.getElementById('book2Size').textContent = fmt(book2.size);
+  document.getElementById('book3Size').textContent = fmt(book3.size);
+
+  // ---- worker ----
+  const wasmBytes = Uint8Array.from(atob(WASM_B64), ch => ch.charCodeAt(0));
+  const worker = new Worker(URL.createObjectURL(new Blob([document.getElementById('workerSrc').textContent], { type: 'text/javascript' })));
+  let workerReady = false, reqId = 0;
+  const outbox = [];
+  function send(msg) { if (workerReady) worker.postMessage(msg); else outbox.push(msg); }
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'ready') { workerReady = true; for (const x of outbox.splice(0)) worker.postMessage(x); return; }
+    if (m.type === 'move' && m.id === reqId) onAiMove(m.col);
+    if (m.type === 'analysis') onAnalysis(m.seq, m.scores);
+  };
+  worker.postMessage({ type: 'init', wasm: wasmBytes.buffer }, [wasmBytes.buffer]);
+
+  // ---- game state ----
+  const AI = 1, HUMAN = 2;
+  const RANK = ['必敗', '和局', '必勝'], RANK_SHORT = ['敗', '和', '勝'];
+  const ALL = [0, 1, 2, 3, 4, 5, 6];
+  let mode = 'human';
+  let grid, heights, seq, over, thinking, waiting, pendingClick, lastCell, winCells;
+  // analysis of the current human turn:
+  //   kind 'rank': m[c] = 0 lost / 1 draw / 2 won for the human
+  //   kind 'dist': m[c] = how many more stones the AI needs to connect four (bigger = longer resistance)
+  let analysis = null;
+  let mistakes = [], lastFb = null;
+  const $ = id => document.getElementById(id);
+  const boardEl = $('board'), statusText = $('statusText'), statusDot = $('statusDot');
+  const recordEl = $('record'), coachEl = $('coach'), btnUndo = $('btnUndo');
+  const hintToggle = $('hintToggle'), coachToggle = $('coachToggle');
+  const colnumEls = [...$('colnums').children];
+  const colEls = [];
+
+  try {
+    const saved = JSON.parse(localStorage.getItem('c4opts') || '{}');
+    if (typeof saved.coach === 'boolean') coachToggle.checked = saved.coach;
+    if (typeof saved.hint === 'boolean') hintToggle.checked = saved.hint;
+    if (saved.mode === 'ai' || saved.mode === 'human') mode = saved.mode;
+  } catch (e) {}
+  function saveOpts() {
+    try { localStorage.setItem('c4opts', JSON.stringify({ coach: coachToggle.checked, hint: hintToggle.checked, mode })); } catch (e) {}
+  }
+
+  for (let c = 0; c < 7; c++) {
+    const col = document.createElement('button');
+    col.className = 'col'; col.setAttribute('aria-label', '第 ' + (c + 1) + ' 欄');
+    for (let r = 0; r < 6; r++) {
+      const cell = document.createElement('div'); cell.className = 'cell';
+      const hole = document.createElement('div'); hole.className = 'hole';
+      cell.appendChild(hole); col.appendChild(cell);
+    }
+    col.addEventListener('click', () => humanMove(c));
+    boardEl.appendChild(col); colEls.push(col);
+  }
+
+  const mover = i => ((mode === 'ai') === (i % 2 === 0)) ? AI : HUMAN;
+  const turn = () => mover(seq.length);
+  const colList = cols => cols.map(c => '第 ' + (c + 1) + ' 欄').join('或');
+
+  function findWin(c, r, p) {
+    for (const [dc, dr] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
+      const cells = [[c, r]];
+      for (const s of [-1, 1]) {
+        let x = c + s * dc, y = r + s * dr;
+        while (x >= 0 && x < 7 && y >= 0 && y < 6 && grid[x][y] === p) { cells.push([x, y]); x += s * dc; y += s * dr; }
+      }
+      if (cells.length >= 4) return cells;
+    }
+    return null;
+  }
+
+  function place(c, p, animate) {
+    const r = heights[c]++;
+    grid[c][r] = p; seq += (c + 1); lastCell = [c, r];
+    const w = findWin(c, r, p);
+    if (w) { over = p; winCells = w; }
+    else if (seq.length === 42) over = 3;
+    render(animate ? lastCell : null);
+  }
+
+  function render(animCell) {
+    for (let c = 0; c < 7; c++) for (let r = 0; r < 6; r++) {
+      const hole = colEls[c].children[r].firstChild;
+      const p = grid[c][r];
+      const isAnim = animCell && animCell[0] === c && animCell[1] === r;
+      let disc = hole.firstChild;
+      if (!p) { if (disc) hole.removeChild(disc); continue; }
+      if (!disc || isAnim) {
+        if (disc) hole.removeChild(disc);
+        disc = document.createElement('div');
+        disc.style.setProperty('--fall', isAnim ? (6 - r) : 0);
+        if (!isAnim) disc.style.animation = 'none';
+        hole.appendChild(disc);
+      }
+      const isWin = winCells && winCells.some(w => w[0] === c && w[1] === r);
+      const isLast = lastCell && lastCell[0] === c && lastCell[1] === r;
+      disc.className = 'disc ' + (p === AI ? 'red' : 'yellow') + (isWin ? ' win' : '') + (isLast ? ' last' : '');
+    }
+    const humanTurn = !over && !thinking && !waiting && turn() === HUMAN;
+    for (let c = 0; c < 7; c++) colEls[c].disabled = !humanTurn || heights[c] >= 6;
+    btnUndo.disabled = thinking || waiting || undoCut() < 0;
+    recordEl.textContent = seq ? '棋譜（欄號）：' + seq.split('').join(' ') : '';
+    const a = hintToggle.checked && humanTurn ? analysis : null;
+    const top = a ? Math.max(...a.m.filter(v => v != null)) : 0;
+    for (let c = 0; c < 7; c++) {
+      const v = a ? a.m[c] : null;
+      if (v == null) { colnumEls[c].className = ''; colnumEls[c].textContent = c + 1; continue; }
+      const rank = a.kind === 'rank';
+      colnumEls[c].className = rank ? 'h' + v : (v === top ? 'h2' : 'h1');
+      colnumEls[c].innerHTML = (c + 1) + '<b>' + (rank ? RANK_SHORT[v] : v + ' 手') + '</b>';
+    }
+    updateStatus();
+    renderCoach();
+  }
+
+  function setStatus(dot, html, spin) {
+    statusDot.className = spin ? 'spinner' : 'dot ' + dot;
+    statusText.innerHTML = html;
+  }
+
+  function updateStatus() {
+    if (over === HUMAN) return setStatus('yellow', mode === 'human'
+      ? '你連成四子，獲勝！<small>全程沒有失誤，這就是先手必勝的下法。</small>'
+      : '你贏了。<small>這不應該發生，請把棋譜回報給我。</small>');
+    if (over === AI) return setStatus('red', 'AI 連成四子，獲勝。<small>' + (mode === 'human'
+      ? '先手不失誤的話應該要贏；可以用「悔棋」回去重下。'
+      : 'AI 先手時這是理論結果。想贏請切到「我先手」。') + '</small>');
+    if (over === 3) return setStatus('none', '和局。<small>' + (mode === 'human' ? '先手不失誤的話應該要贏。' : '這不應該發生，請把棋譜回報給我。') + '</small>');
+    if (waiting) return setStatus('yellow', '分析中…<small>正在計算每一欄的結果。</small>', true);
+    if (thinking) return setStatus('red', 'AI 思考中…', true);
+    return setStatus('yellow', '輪到你（黃）。<small>點任一欄落子。</small>');
+  }
+
+  function renderCoach() {
+    if (!coachToggle.checked) { coachEl.innerHTML = ''; return; }
+    let html = '';
+    const f = lastFb;
+    if (f) {
+      const n = Math.floor(f.idx / 2) + 1, col = '第 ' + (f.col + 1) + ' 欄';
+      if (f.kind === 'rank') {
+        if (f.ok) {
+          html += '<div class="fb good"><strong class="good">正確。</strong>你的第 ' + n + ' 手下' + col + '，局面維持「' + RANK[f.after] + '」。';
+          if (f.before === 0) html += '不過這個局面已經是理論必敗，下哪一欄都救不回來，問題出在更早的失誤。';
+          else if (f.unique) html += '這是唯一不掉結果的一步。';
+          html += '</div>';
+        } else {
+          html += '<div class="fb bad"><strong class="bad">失誤。</strong>你的第 ' + n + ' 手下' + col + '，局面從「' + RANK[f.before] + '」變成「' + RANK[f.after] + '」。' +
+            '應該下<b>' + colList(f.bestCols) + '</b>，才能維持「' + RANK[f.before] + '」。按「悔棋」可以回去重下。</div>';
+        }
+      } else if (f.ok) {
+        html += '<div class="fb good"><strong class="good">正確。</strong>你的第 ' + n + ' 手下' + col + '是最頑強的防守，AI 最快還要 ' + f.after + ' 手才能連成四子。' +
+          (f.unique ? '這是唯一撐最久的一步。' : '') + '</div>';
+      } else {
+        html += '<div class="fb bad"><strong class="bad">可以更好。</strong>你的第 ' + n + ' 手下' + col + '，AI 最快再 ' + f.after + ' 手就能連成四子。' +
+          '下<b>' + colList(f.bestCols) + '</b>可以拖到 ' + f.before + ' 手。按「悔棋」可以回去重下。</div>';
+      }
+    } else if (mode === 'human' && !seq.length) {
+      html += '<div class="fb info">你先手。每下一步，教練會告訴你這步有沒有下錯、應該下哪裡。</div>';
+    } else if (mode === 'ai' && seq.length <= 1) {
+      html += '<div class="fb info">AI 先手時你理論上必敗，所以教練改成比較「撐得久不久」：每下一步，會告訴你這步是不是最頑強的防守。</div>';
+    }
+    if (mistakes.length) {
+      html += '<div class="review"><h2>本局檢討（' + mistakes.length + ' 處）</h2><ol>';
+      for (const g of mistakes) {
+        const n = Math.floor(g.idx / 2) + 1;
+        html += g.kind === 'rank'
+          ? '<li>第 ' + n + ' 手：下了第 ' + (g.col + 1) + ' 欄（' + RANK[g.before] + ' → ' + RANK[g.after] + '），應下' + colList(g.bestCols) + '。</li>'
+          : '<li>第 ' + n + ' 手：下了第 ' + (g.col + 1) + ' 欄（撐 ' + g.after + ' 手），下' + colList(g.bestCols) + '可以撐 ' + g.before + ' 手。</li>';
+      }
+      html += '</ol></div>';
+    }
+    coachEl.innerHTML = html;
+  }
+
+  // ---- turn flow (same for both modes) ----
+  function prepareAnalysis() {
+    analysis = null;
+    const b = (mode === 'human' ? book2 : book3).get(seq);
+    if (b) {
+      const best = Math.max(...b.m.filter(v => v != null));
+      analysis = { kind: mode === 'human' ? 'rank' : 'dist', m: b.m, replies: b.replies, bestCols: ALL.filter(c => b.m[c] === best) };
+    } else {
+      send({ type: 'analyze', seq });
+    }
+    render();
+  }
+
+  function onAnalysis(s, scores) {
+    if (s !== seq || over || turn() !== HUMAN || analysis) return;
+    const top = Math.max(...scores.filter(v => v != null));
+    const bestCols = ALL.filter(c => scores[c] === top);
+    if (mode === 'human') {
+      analysis = { kind: 'rank', m: scores.map(v => v == null ? null : v > 0 ? 2 : v < 0 ? 0 : 1), replies: null, bestCols };
+    } else {
+      // score v < 0: the AI wins with its (22 + v)-th stone; it has (len + 1) / 2 stones now
+      const have = (seq.length + 1) / 2;
+      analysis = { kind: 'dist', m: scores.map(v => v == null ? null : v < 0 ? 22 + v - have : 99), replies: null, bestCols };
+    }
+    if (pendingClick != null) { const c = pendingClick; pendingClick = null; waiting = false; coachMove(c); }
+    else render();
+  }
+
+  function coachMove(c) {
+    const a = analysis, idx = seq.length;
+    const best = Math.max(...a.m.filter(v => v != null)), mine = a.m[c];
+    const fb = { kind: a.kind, idx, col: c, before: best, after: mine, bestCols: a.bestCols, ok: mine === best,
+                 unique: a.m.filter(v => v === best).length === 1 };
+    if (!fb.ok) mistakes.push(fb);
+    lastFb = fb;
+    const reply = a.replies ? a.replies[c] : null;
+    analysis = null;
+    place(c, HUMAN, true);
+    if (over) return;
+    thinking = true; render();
+    if (reply != null) {
+      const id = ++reqId;
+      setTimeout(() => { if (id === reqId) onAiMove(reply); }, 420);
+    } else {
+      send({ type: 'move', id: ++reqId, seq });
+    }
+  }
+
+  function onAiMove(col) {
+    thinking = false;
+    place(col, AI, true);
+    if (!over) prepareAnalysis();
+  }
+
+  function humanMove(c) {
+    if (over || thinking || waiting || turn() !== HUMAN || heights[c] >= 6) return;
+    if (!analysis) { pendingClick = c; waiting = true; render(); return; }
+    coachMove(c);
+  }
+
+  function replay(s) {
+    grid = Array.from({ length: 7 }, () => Array(6).fill(0));
+    heights = Array(7).fill(0); seq = ''; over = 0; thinking = false; waiting = false; pendingClick = null;
+    lastCell = null; winCells = null; analysis = null;
+    reqId++;
+    for (let i = 0; i < s.length; i++) {
+      const c = +s[i] - 1, p = mover(i);
+      const r = heights[c]++; grid[c][r] = p; seq += s[i]; lastCell = [c, r];
+    }
+  }
+
+  // index of the human's most recent move (position to return to), or -1
+  function undoCut() {
+    for (let k = seq.length - 1; k >= 0; k--) if (mover(k) === HUMAN) return k;
+    return -1;
+  }
+
+  function newGame() {
+    mistakes = []; lastFb = null;
+    replay('');
+    if (mode === 'ai') place(3, AI, true);      // the only winning first move
+    prepareAnalysis();
+  }
+
+  function setMode(m) {
+    mode = m;
+    $('modeAi').setAttribute('aria-pressed', m === 'ai');
+    $('modeHuman').setAttribute('aria-pressed', m === 'human');
+    saveOpts();
+    newGame();
+  }
+
+  $('btnNew').addEventListener('click', newGame);
+  $('modeAi').addEventListener('click', () => setMode('ai'));
+  $('modeHuman').addEventListener('click', () => setMode('human'));
+  hintToggle.addEventListener('change', () => { saveOpts(); render(); });
+  coachToggle.addEventListener('change', () => { saveOpts(); render(); });
+  btnUndo.addEventListener('click', () => {
+    if (thinking || waiting) return;
+    const cut = undoCut();
+    if (cut < 0) return;
+    replay(seq.slice(0, cut));
+    mistakes = mistakes.filter(f => f.idx < cut); lastFb = null;
+    prepareAnalysis();
+  });
+
+  setMode(mode);
+})();
+</script>
+</body>
+</html>
